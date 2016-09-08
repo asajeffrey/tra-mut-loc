@@ -83,7 +83,7 @@ impl<'a, 'b> RWTransaction<'a, 'b> {
 }
 
 impl<'a, 'b> ROTransaction<'a, 'b> {
-    pub fn borrow<T>(&self, cell: &TCell<'a, T>) -> Result<&T, TransactionErr> {
+    pub fn borrow<T: Sync>(&self, cell: &TCell<'a, T>) -> Result<&T, TransactionErr> {
         let tmp = unsafe { cell.contents.get().as_ref().unwrap() };
         if cell.version.load(Ordering::Acquire) < self.version { 
             Ok(tmp)
