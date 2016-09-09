@@ -120,6 +120,7 @@ impl<'a, 'b> ROTransaction<'a, 'b> {
         if cell.version.load(Ordering::Acquire) < self.version.get() { 
             Ok(Ref{ transaction: self, cell: cell })
         } else {
+            self.version.set(0);
             Err(TransactionErr)
         }
     }
