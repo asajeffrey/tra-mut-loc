@@ -26,7 +26,6 @@ pub struct RWTransaction<'a, 'b> where 'a: 'b {
     region: &'b Region<'a>,
     #[allow(dead_code)]
     guard: MutexGuard<'b, ()>,
-    phantom: PhantomData<(Invariant<'a>, Covariant<'b>)>,
 }
 
 pub struct ROTransaction<'a, 'b> {
@@ -52,7 +51,6 @@ impl<'a> Region<'a> {
         RWTransaction {
             region: self,
             guard: guard,
-            phantom: PhantomData,
         }
     }    
     pub fn ro_transaction<'b>(&'b self) -> ROTransaction<'a, 'b> {
