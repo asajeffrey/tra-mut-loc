@@ -22,8 +22,8 @@ pub struct TCell<'a, T> {
     phantom: PhantomData<Invariant<'a>>,
 }
 
-pub struct RWTransaction<'a, 'b> {
-    version: &'b AtomicUsize,
+pub struct RWTransaction<'a, 'b> where 'a: 'b {
+    region: &'b Region<'a>,
     #[allow(dead_code)]
     guard: MutexGuard<'b, ()>,
     phantom: PhantomData<(Invariant<'a>, Covariant<'b>)>,
@@ -50,7 +50,7 @@ impl<'a> Region<'a> {
         let version = 1 + self.version.load(Ordering::Relaxed);
         self.version.store(version, Ordering::Relaxed);
         RWTransaction {
-            version: &self.version,
+            region: self,
             guard: guard,
             phantom: PhantomData,
         }
@@ -66,8 +66,8 @@ impl<'a> Region<'a> {
 
 impl<'a, 'b> Drop for RWTransaction<'a, 'b> {
     fn drop(&mut self) {
-        let version = 1 + self.version.load(Ordering::Relaxed);
-        self.version.store(version, Ordering::Relaxed);
+        let version = 1 + self.region.version.load(Ordering::Relaxed);
+        self.region.version.store(version, Ordering::Relaxed);
     }
 }
 
@@ -76,7 +76,7 @@ impl<'a, 'b> RWTransaction<'a, 'b> {
         unsafe { cell.contents.get().as_ref().unwrap() }
     }
     pub fn borrow_mut<T>(&mut self, cell: &TCell<'a, T>) -> &mut T {
-        let version = self.version.load(Ordering::Relaxed);
+        let version = self.region.version.load(Ordering::Relaxed);
         cell.version.store(version, Ordering::Release);
         unsafe { cell.contents.get().as_mut().unwrap() }
     }
