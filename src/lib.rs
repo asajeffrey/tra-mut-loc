@@ -56,7 +56,7 @@ impl<'a> Region<'a> {
         }
     }    
     pub fn ro_transaction<'b>(&'b self) -> ROTransaction<'a, 'b> {
-        let version = self.version.load(Ordering::Relaxed);
+        let version = self.version.load(Ordering::Acquire);
         ROTransaction {
             version: version,
             phantom: PhantomData,
