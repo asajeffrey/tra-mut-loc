@@ -4,6 +4,7 @@
 
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -32,6 +33,10 @@ pub struct RWTransaction<'a, 'b> where 'a: 'b {
 pub struct ROTransaction<'a, 'b> {
     version: usize,
     phantom: PhantomData<(Invariant<'a>, Covariant<'b>)>,
+}
+
+pub struct Ref<'c, T> where T: 'c {
+    contents: &'c T,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +69,13 @@ impl<'a> Region<'a> {
     }    
 }
 
+impl<'c, T> Deref for Ref<'c, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.contents
+    }
+}
+
 impl<'a, 'b> Drop for RWTransaction<'a, 'b> {
     fn drop(&mut self) {
         self.region.version.store(self.version + 1, Ordering::Relaxed);
@@ -81,10 +93,10 @@ impl<'a, 'b> RWTransaction<'a, 'b> {
 }
 
 impl<'a, 'b> ROTransaction<'a, 'b> {
-    pub fn borrow<T: Sync>(&self, cell: &TCell<'a, T>) -> Result<&T, TransactionErr> {
+    pub fn borrow<T: Sync>(&self, cell: &TCell<'a, T>) -> Result<Ref<T>, TransactionErr> {
         let tmp = unsafe { cell.contents.get().as_ref().unwrap() };
         if cell.version.load(Ordering::Acquire) < self.version { 
-            Ok(tmp)
+            Ok(Ref{ contents: tmp })
         } else {
             Err(TransactionErr)
         }
