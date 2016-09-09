@@ -23,6 +23,7 @@ pub struct TCell<'a, T> {
 }
 
 pub struct RWTransaction<'a, 'b> where 'a: 'b {
+    version: usize,
     region: &'b Region<'a>,
     #[allow(dead_code)]
     guard: MutexGuard<'b, ()>,
@@ -49,6 +50,7 @@ impl<'a> Region<'a> {
         let version = 1 + self.version.load(Ordering::Relaxed);
         self.version.store(version, Ordering::Relaxed);
         RWTransaction {
+            version: version,
             region: self,
             guard: guard,
         }
@@ -64,8 +66,7 @@ impl<'a> Region<'a> {
 
 impl<'a, 'b> Drop for RWTransaction<'a, 'b> {
     fn drop(&mut self) {
-        let version = 1 + self.region.version.load(Ordering::Relaxed);
-        self.region.version.store(version, Ordering::Relaxed);
+        self.region.version.store(self.version + 1, Ordering::Relaxed);
     }
 }
 
@@ -74,8 +75,7 @@ impl<'a, 'b> RWTransaction<'a, 'b> {
         unsafe { cell.contents.get().as_ref().unwrap() }
     }
     pub fn borrow_mut<T>(&mut self, cell: &TCell<'a, T>) -> &mut T {
-        let version = self.region.version.load(Ordering::Relaxed);
-        cell.version.store(version, Ordering::Release);
+        cell.version.store(self.version, Ordering::Release);
         unsafe { cell.contents.get().as_mut().unwrap() }
     }
 }
