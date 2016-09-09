@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,19 +24,20 @@ pub struct TCell<'a, T> {
 }
 
 pub struct RWTransaction<'a, 'b> where 'a: 'b {
-    version: usize,
+    version: Cell<usize>,
     region: &'b Region<'a>,
     #[allow(dead_code)]
     guard: MutexGuard<'b, ()>,
 }
 
-pub struct ROTransaction<'a, 'b> {
-    version: usize,
+pub struct ROTransaction<'a, 'b> where 'a: 'b {
+    version: Cell<usize>,
     phantom: PhantomData<(Invariant<'a>, Covariant<'b>)>,
 }
 
-pub struct Ref<'c, T> where T: 'c {
-    contents: &'c T,
+pub struct Ref<'a, 'b, 'c, T> where 'a:  'b, 'b: 'c, T: 'c {
+    transaction: &'c ROTransaction<'a, 'b>,
+    cell: &'c TCell<'a, T>,
 }
 
 #[derive(Clone, Debug)]
@@ -55,7 +56,7 @@ impl<'a> Region<'a> {
         let version = 1 + self.version.load(Ordering::Relaxed);
         self.version.store(version, Ordering::Relaxed);
         RWTransaction {
-            version: version,
+            version: Cell::new(version),
             region: self,
             guard: guard,
         }
@@ -63,22 +64,40 @@ impl<'a> Region<'a> {
     pub fn ro_transaction<'b>(&'b self) -> ROTransaction<'a, 'b> {
         let version = self.version.load(Ordering::Acquire);
         ROTransaction {
-            version: version,
+            version: Cell::new(version),
             phantom: PhantomData,
         }
     }    
 }
 
-impl<'c, T> Deref for Ref<'c, T> {
+impl<'a, 'b, 'c, T> Deref for Ref<'a, 'b, 'c, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        self.contents
+        unsafe { self.cell.contents.get().as_ref().unwrap() }
+    }
+}
+
+impl<'a, 'b, 'c, T> Drop for Ref<'a, 'b, 'c, T> {
+    fn drop(&mut self) {
+        if self.transaction.version.get() <= self.cell.version.load(Ordering::Acquire) {
+            self.transaction.version.set(0);
+        }
+    }
+}
+
+impl<'a, 'b> Drop for ROTransaction<'a, 'b> {
+    fn drop(&mut self) {
+        if self.version.get() > 0 {
+            panic!("Transactions should be ended.");
+        }
     }
 }
 
 impl<'a, 'b> Drop for RWTransaction<'a, 'b> {
     fn drop(&mut self) {
-        self.region.version.store(self.version + 1, Ordering::Relaxed);
+        if self.version.get() > 0 {
+            panic!("Transactions should be ended.");
+        }
     }
 }
 
@@ -87,16 +106,27 @@ impl<'a, 'b> RWTransaction<'a, 'b> {
         unsafe { cell.contents.get().as_ref().unwrap() }
     }
     pub fn borrow_mut<T>(&mut self, cell: &TCell<'a, T>) -> &mut T {
-        cell.version.store(self.version, Ordering::Release);
+        cell.version.store(self.version.get(), Ordering::Release);
         unsafe { cell.contents.get().as_mut().unwrap() }
+    }
+    pub fn end(self) {
+        self.region.version.store(self.version.get() + 1, Ordering::Relaxed);
+        self.version.set(0);
     }
 }
 
 impl<'a, 'b> ROTransaction<'a, 'b> {
-    pub fn borrow<T: Sync>(&self, cell: &TCell<'a, T>) -> Result<Ref<T>, TransactionErr> {
-        let tmp = unsafe { cell.contents.get().as_ref().unwrap() };
-        if cell.version.load(Ordering::Acquire) < self.version { 
-            Ok(Ref{ contents: tmp })
+    pub fn borrow<'c, T: Sync>(&'c self, cell: &'c TCell<'a, T>) -> Result<Ref<'a, 'b, 'c, T>, TransactionErr> {
+        if cell.version.load(Ordering::Acquire) < self.version.get() { 
+            Ok(Ref{ transaction: self, cell: cell })
+        } else {
+            Err(TransactionErr)
+        }
+    }
+    pub fn end(self) -> Result<(), TransactionErr> {
+        if 0 < self.version.get() {
+            self.version.set(0);
+            Ok(())
         } else {
             Err(TransactionErr)
         }
@@ -117,6 +147,7 @@ fn test_ro() {
         let x = r.mkcell(37);
         let tx = r.ro_transaction();
         assert_eq!(37, *tx.borrow(&x).unwrap());
+        tx.end().unwrap();
     })
 }
 
@@ -128,6 +159,7 @@ fn test_rw() {
         assert_eq!(37, *tx.borrow(&x));
         *tx.borrow_mut(&x) = 5;
         assert_eq!(5, *tx.borrow(&x));
+        tx.end();
     })
 }
 
