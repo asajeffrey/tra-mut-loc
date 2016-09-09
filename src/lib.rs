@@ -8,7 +8,7 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-pub trait Region {
+pub trait Region: 'static + Sync + Send {
     fn mkcell<T>(&self, init: T) -> TCell<Self, T>;
     fn rw_transaction<'a>(&'a self) -> RWTransaction<'a, Self>;
     fn ro_transaction<'a>(&'a self) -> ROTransaction<'a, Self>;
@@ -49,6 +49,9 @@ pub struct Ref<'a, 'b, R: ?Sized, T> where 'a: 'b, R: 'b, T: 'b {
 
 #[derive(Clone, Debug)]
 pub struct TransactionErr;
+
+unsafe impl<R: ?Sized, T: Sync> Sync for TCell<R, T> {}
+unsafe impl<R: ?Sized, T: Send> Send for TCell<R, T> {}
 
 impl Region for RegionImpl {
     fn mkcell<T>(&self, init: T) -> TCell<RegionImpl, T> {
@@ -149,6 +152,11 @@ pub fn mkregion<C: RegionConsumer>(consumer: C) {
     })
 }
 
+#[cfg(test)]
+use std::thread;
+#[cfg(test)]
+use std::sync::Arc;
+
 #[test]
 fn test_ro() {
     struct Test;
@@ -174,6 +182,37 @@ fn test_rw() {
             *tx.borrow_mut(&x) = 5;
             assert_eq!(5, *tx.borrow(&x));
             tx.end();
+        }
+    }
+    mkregion(Test);
+}
+
+#[test]
+fn test_conflict() {
+    struct Test;
+    fn thread<R: Region>(r: Arc<R>, x: Arc<TCell<R,usize>>, y: Arc<TCell<R,usize>>) -> Result<(),TransactionErr> {
+        // Increment both x and y
+        let mut tx = r.rw_transaction();
+        *tx.borrow_mut(&x) = *tx.borrow(&x) + 1;
+        *tx.borrow_mut(&y) = *tx.borrow(&y)+ 1;
+        tx.end();
+        // Check that x == y
+        let tx = r.ro_transaction();
+        let a = *try!(tx.borrow(&x));
+        let b = *try!(tx.borrow(&y));
+        try!(tx.end());
+        assert_eq!(a, b);
+        Ok(())
+    }
+    impl RegionConsumer for Test {
+        fn consume<R: Region>(self, r: R) {
+            let r = Arc::new(r);
+            let x = Arc::new(r.mkcell(37));
+            let y = Arc::new(r.mkcell(37));
+            for _ in 0..1000 {
+                let (r, x, y) = (r.clone(), x.clone(), y.clone());
+                thread::spawn(move || { thread(r, x, y) });
+            }
         }
     }
     mkregion(Test);
