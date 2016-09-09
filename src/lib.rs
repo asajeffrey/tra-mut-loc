@@ -123,7 +123,7 @@ fn test_rw() {
 
 // Shouldn't typecheck:
 //
-// fn unsafe() {
+// fn not_safe() {
 //     mkregion(|r1| mkregion(|r2| {
 //         let x = r2.mkcell(37);
 //         let tx = r1.ro_transaction();
