@@ -121,7 +121,7 @@ impl<'a, R> RWTransaction<'a, R> {
         unsafe { cell.contents.get().as_mut().unwrap() }
     }
     pub fn end(self) {
-        self.region.version.store(self.version.get() + 1, Ordering::Relaxed);
+        self.region.version.store(self.version.get() + 1, Ordering::Release);
         self.version.set(0);
     }
 }
