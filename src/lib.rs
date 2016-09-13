@@ -2,11 +2,27 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use std::cell::{Cell, UnsafeCell};
+use std::cell::{UnsafeCell};
 use std::marker::PhantomData;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
+
+/// A trait for copyable data that contains no pointers.
+pub unsafe trait TCopy: Copy {}
+unsafe impl TCopy for bool {}
+unsafe impl TCopy for f32 {}
+unsafe impl TCopy for f64 {}
+unsafe impl TCopy for i8 {}
+unsafe impl TCopy for i16 {}
+unsafe impl TCopy for i32 {}
+unsafe impl TCopy for i64 {}
+unsafe impl TCopy for isize {}
+unsafe impl TCopy for u8 {}
+unsafe impl TCopy for u16 {}
+unsafe impl TCopy for u32 {}
+unsafe impl TCopy for u64 {}
+unsafe impl TCopy for usize {}
 
 pub trait Region: 'static + Sync + Send {
     fn mkcell<T>(&self, init: T) -> TCell<Self, T>;
@@ -30,7 +46,7 @@ pub struct TCell<R: ?Sized, T> {
 }
 
 pub struct RWTransaction<'a, R: ?Sized> {
-    version: Cell<usize>,
+    version: usize,
     region: &'a RegionImpl,
     #[allow(dead_code)]
     guard: MutexGuard<'a, ()>,
@@ -38,13 +54,14 @@ pub struct RWTransaction<'a, R: ?Sized> {
 }
 
 pub struct ROTransaction<'a, R: ?Sized> {
-    version: Cell<usize>,
+    version: usize,
     phantom: PhantomData<(&'a (), R)>,
 }
 
-pub struct Ref<'a, 'b, R: ?Sized, T> where 'a: 'b, R: 'b, T: 'b {
-    transaction: &'b ROTransaction<'a, R>,
-    cell: &'b TCell<R, T>,
+pub struct RWRef<'a, T> where 'a, T: 'a {
+    tx_version: usize,
+    cell_version: &'a AtomicUsize,
+    data: &'a mut T,
 }
 
 #[derive(Clone, Debug)]
@@ -63,10 +80,10 @@ impl Region for RegionImpl {
     }
     fn rw_transaction<'a>(&'a self) -> RWTransaction<'a, RegionImpl> {
         let guard = self.lock.lock().unwrap();
-        let version = 1 + self.version.load(Ordering::Relaxed);
-        self.version.store(version, Ordering::Relaxed);
+        let version = 1 + self.version.load(Ordering::Acquire);
+        self.version.store(version, Ordering::Release);
         RWTransaction {
-            version: Cell::new(version),
+            version: version,
             region: self,
             guard: guard,
             phantom: PhantomData,
@@ -75,70 +92,51 @@ impl Region for RegionImpl {
     fn ro_transaction<'a>(&'a self) -> ROTransaction<'a, RegionImpl> {
         let version = self.version.load(Ordering::Acquire);
         ROTransaction {
-            version: Cell::new(version),
+            version: version,
             phantom: PhantomData,
         }
     }
 }
 
-impl<'a, 'b, R, T> Deref for Ref<'a, 'b, R, T> {
+impl<'a, T> Deref for RWRef<'a, T> {
     type Target = T;
     fn deref(&self) -> &T {
-        unsafe { self.cell.contents.get().as_ref().unwrap() }
+        &*self.data
     }
 }
 
-impl<'a, 'b, R: ?Sized, T> Drop for Ref<'a, 'b, R, T> {
-    fn drop(&mut self) {
-        if self.transaction.version.get() <= self.cell.version.load(Ordering::Acquire) {
-            self.transaction.version.set(0);
-        }
-    }
-}
-
-impl<'a, R: ?Sized> Drop for ROTransaction<'a, R> {
-    fn drop(&mut self) {
-        if self.version.get() > 0 {
-            panic!("Transactions should be ended.");
-        }
+impl<'a, T> DerefMut for RWRef<'a, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.cell_version.store(self.tx_version, Ordering::Release);
+        &mut *self.data
     }
 }
 
 impl<'a, R: ?Sized> Drop for RWTransaction<'a, R> {
     fn drop(&mut self) {
-        if self.version.get() > 0 {
-            panic!("Transactions should be ended.");
-        }
+        self.region.version.store(self.version + 1, Ordering::Release);
     }
 }
 
 impl<'a, R> RWTransaction<'a, R> {
-    pub fn borrow<T>(&self, cell: &TCell<R, T>) -> &T {
+    pub fn borrow<'b, T>(&'b self, cell: &'b TCell<R, T>) -> &'b T {
         unsafe { cell.contents.get().as_ref().unwrap() }
     }
-    pub fn borrow_mut<T>(&mut self, cell: &TCell<R, T>) -> &mut T {
-        cell.version.store(self.version.get(), Ordering::Release);
-        unsafe { cell.contents.get().as_mut().unwrap() }
-    }
-    pub fn end(self) {
-        self.region.version.store(self.version.get() + 1, Ordering::Release);
-        self.version.set(0);
+    pub fn borrow_mut<'b, T>(&'b mut self, cell: &'b TCell<R, T>) -> RWRef<'b, T> {
+        RWRef { 
+            tx_version: self.version,
+            cell_version: &cell.version,
+            data: unsafe { cell.contents.get().as_mut().unwrap() },
+        }
     }
 }
 
 impl<'a, R> ROTransaction<'a, R> {
-    pub fn borrow<'b, T: Sync>(&'b self, cell: &'b TCell<R, T>) -> Result<Ref<'a, 'b, R, T>, TransactionErr> {
-        if cell.version.load(Ordering::Acquire) < self.version.get() { 
-            Ok(Ref{ transaction: self, cell: cell })
-        } else {
-            self.version.set(0);
-            Err(TransactionErr)
-        }
-    }
-    pub fn end(self) -> Result<(), TransactionErr> {
-        if 0 < self.version.get() {
-            self.version.set(0);
-            Ok(())
+    pub fn get<'b, T: TCopy>(&'b self, cell: &'b TCell<R, T>) -> Result<T, TransactionErr> {
+        let result = unsafe { *cell.contents.get() };
+        // I think we need a CAS here for its ordering effects
+        if cell.version.compare_and_swap(0, 0, Ordering::AcqRel) < self.version { 
+            Ok(result)
         } else {
             Err(TransactionErr)
         }
@@ -152,10 +150,8 @@ pub fn mkregion<C: RegionConsumer>(consumer: C) {
     })
 }
 
-#[cfg(test)]
-use std::thread;
-#[cfg(test)]
-use std::sync::Arc;
+#[cfg(test)] use std::thread;
+#[cfg(test)] use std::sync::Arc;
 
 #[test]
 fn test_ro() {
@@ -164,8 +160,7 @@ fn test_ro() {
         fn consume<R: Region>(self, r: R) {
             let x = r.mkcell(37);
             let tx = r.ro_transaction();
-            assert_eq!(37, *tx.borrow(&x).unwrap());
-            tx.end().unwrap();
+            assert_eq!(37, tx.get(&x).unwrap());
         }
     }
     mkregion(Test);
@@ -176,12 +171,13 @@ fn test_rw() {
     struct Test;
     impl RegionConsumer for Test {
         fn consume<R: Region>(self, r: R) {
-            let x = r.mkcell(37);
+            let mut x = r.mkcell(37);
             let mut tx = r.rw_transaction();
             assert_eq!(37, *tx.borrow(&x));
             *tx.borrow_mut(&x) = 5;
             assert_eq!(5, *tx.borrow(&x));
-            tx.end();
+            *tx.borrow_mut(&mut x) = 42;
+            assert_eq!(42, *tx.borrow(&x));
         }
     }
     mkregion(Test);
@@ -192,16 +188,18 @@ fn test_conflict() {
     struct Test;
     fn thread<R: Region>(r: Arc<R>, x: Arc<TCell<R,usize>>, y: Arc<TCell<R,usize>>) -> Result<(),TransactionErr> {
         // Increment both x and y
-        let mut tx = r.rw_transaction();
-        *tx.borrow_mut(&x) = *tx.borrow(&x) + 1;
-        *tx.borrow_mut(&y) = *tx.borrow(&y)+ 1;
-        tx.end();
+        {
+            let mut tx = r.rw_transaction();
+            *tx.borrow_mut(&x) = *tx.borrow(&x) + 1;
+            *tx.borrow_mut(&y) = *tx.borrow(&y) + 1;
+        }
         // Check that x == y
-        let tx = r.ro_transaction();
-        let a = *try!(tx.borrow(&x));
-        let b = *try!(tx.borrow(&y));
-        try!(tx.end());
-        assert_eq!(a, b);
+        {
+            let tx = r.ro_transaction();
+            let a = try!(tx.get(&x));
+            let b = try!(tx.get(&y));
+            assert_eq!(a, b);
+        }
         Ok(())
     }
     impl RegionConsumer for Test {
@@ -209,9 +207,13 @@ fn test_conflict() {
             let r = Arc::new(r);
             let x = Arc::new(r.mkcell(37));
             let y = Arc::new(r.mkcell(37));
+            let mut threads = Vec::new();
             for _ in 0..1000 {
                 let (r, x, y) = (r.clone(), x.clone(), y.clone());
-                thread::spawn(move || { thread(r, x, y) });
+                threads.push(thread::spawn(move || { thread(r, x, y) }));
+            }
+            for thread in threads.drain(..) {
+                let _ = thread.join().unwrap();
             }
         }
     }
