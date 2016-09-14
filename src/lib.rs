@@ -119,14 +119,18 @@ impl<'a, T> DerefMut for RWRef<'a, T> {
 }
 
 impl<'a, T> RORef<'a, T> {
-    pub fn get(&self) -> Result<T, TransactionErr> where T: TCopy {
-        let result = unsafe { *self.data };
+    pub fn touch(&self) -> Result<(), TransactionErr> {
         // I think we need a CAS here for its ordering effects
         if self.cell_version.compare_and_swap(0, 0, Ordering::AcqRel) < self.tx_version {
             Ok(result)
         } else {
             Err(TransactionErr)
         }
+    }
+    pub fn get(&self) -> Result<T, TransactionErr> where T: TCopy {
+        let result = unsafe { *self.data };
+        try!(self.touch());
+        Ok(result);
     }
 }
 
