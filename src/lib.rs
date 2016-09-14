@@ -64,6 +64,12 @@ pub struct RWRef<'a, T> where 'a, T: 'a {
     data: &'a mut T,
 }
 
+pub struct RORef<'a, T> where 'a, T: 'a {
+    tx_version: usize,
+    cell_version: &'a AtomicUsize,
+    data: *const T,
+}
+
 #[derive(Clone, Debug)]
 pub struct TransactionErr;
 
@@ -112,6 +118,18 @@ impl<'a, T> DerefMut for RWRef<'a, T> {
     }
 }
 
+impl<'a, T> RORef<'a, T> {
+    pub fn get(&self) -> Result<T, TransactionErr> where T: TCopy {
+        let result = unsafe { *self.data };
+        // I think we need a CAS here for its ordering effects
+        if self.cell_version.compare_and_swap(0, 0, Ordering::AcqRel) < self.tx_version {
+            Ok(result)
+        } else {
+            Err(TransactionErr)
+        }
+    }
+}
+
 impl<'a, R: ?Sized> Drop for RWTransaction<'a, R> {
     fn drop(&mut self) {
         self.region_impl.version.store(self.version + 1, Ordering::Release);
@@ -142,14 +160,15 @@ impl<'a, R> RWTransaction<'a, R> where R: Region {
 }
 
 impl<'a, R> ROTransaction<'a, R> {
-    pub fn get<'b, T: TCopy>(&'b self, cell: &'b TCell<R, T>) -> Result<T, TransactionErr> {
-        let result = unsafe { *cell.contents.get() };
-        // I think we need a CAS here for its ordering effects
-        if cell.version.compare_and_swap(0, 0, Ordering::AcqRel) < self.version {
-            Ok(result)
-        } else {
-            Err(TransactionErr)
+    pub fn borrow<'b, T>(&'b self, cell: &'b TCell<R, T>) -> RORef<'b, T> {
+        RORef {
+            tx_version: self.version,
+            cell_version: &cell.version,
+            data: cell.contents.get(),
         }
+    }
+    pub fn get<'b, T: TCopy>(&'b self, cell: &'b TCell<R, T>) -> Result<T, TransactionErr> {
+        self.borrow(cell).get()
     }
 }
 
@@ -171,6 +190,7 @@ fn test_ro() {
             let x = r.mkcell(37);
             let tx = r.ro_transaction();
             assert_eq!(37, tx.get(&x).unwrap());
+            assert_eq!(37, tx.borrow(&x).get().unwrap());
         }
     }
     mkregion(Test);
