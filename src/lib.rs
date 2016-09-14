@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use std::cell::{UnsafeCell};
+use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,11 +35,13 @@ pub trait RegionConsumer {
     fn consume<R: Region>(self, r: R);
 }
 
+#[derive(Debug)]
 struct RegionImpl {
     version: AtomicUsize,
     lock: Mutex<()>,
 }
 
+#[derive(Debug)]
 pub struct TCell<R: ?Sized, T> {
     version: AtomicUsize,
     contents: UnsafeCell<T>,
@@ -53,24 +56,45 @@ pub struct RWTransaction<'a, R: 'a+?Sized> {
     guard: MutexGuard<'a, ()>,
 }
 
+impl<'a, R:?Sized> fmt::Debug for RWTransaction<'a, R> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        fmt.debug_struct("RWTransaction")
+            .field("version", &self.version)
+            .finish()
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
 pub struct ROTransaction<'a, R: ?Sized> {
     version: usize,
     phantom: PhantomData<(&'a (), R)>,
 }
 
+#[derive(Debug)]
 pub struct RWRef<'a, T> where 'a, T: 'a {
     tx_version: usize,
     cell_version: &'a AtomicUsize,
     data: &'a mut T,
 }
 
+#[derive(Debug)]
 pub struct RORef<'a, T> where 'a, T: 'a {
     tx_version: usize,
     cell_version: &'a AtomicUsize,
     data: *const T,
 }
 
-#[derive(Clone, Debug)]
+impl<'a, T> Clone for RORef<'a, T> {
+    fn clone(&self) -> RORef<'a, T> {
+        RORef {
+            tx_version: self.tx_version,
+            cell_version: self.cell_version,
+            data: self.data,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
 pub struct TransactionErr;
 
 unsafe impl<R: ?Sized, T: Sync> Sync for TCell<R, T> {}
