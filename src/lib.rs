@@ -84,14 +84,9 @@ pub struct RORef<'a, T> where 'a, T: 'a {
     data: *const T,
 }
 
+impl<'a, T> Copy for RORef<'a, T> {}
 impl<'a, T> Clone for RORef<'a, T> {
-    fn clone(&self) -> RORef<'a, T> {
-        RORef {
-            tx_version: self.tx_version,
-            cell_version: self.cell_version,
-            data: self.data,
-        }
-    }
+    fn clone(&self) -> RORef<'a, T> { *self }
 }
 
 #[derive(Copy, Clone, Debug)]
