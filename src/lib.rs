@@ -130,7 +130,7 @@ impl<'a, T> RORef<'a, T> {
     pub fn get(&self) -> Result<T, TransactionErr> where T: TCopy {
         let result = unsafe { *self.data };
         try!(self.touch());
-        Ok(result);
+        Ok(result)
     }
 }
 
@@ -216,6 +216,21 @@ fn test_rw() {
     }
     mkregion(Test);
 }
+
+// #[test]
+// fn test_index() {
+//     struct Test;
+//     impl RegionConsumer for Test {
+//         fn consume<R: Region>(self, r: R) {
+//             let xs = r.mkcell(vec![ 1, 2, 3 ]);
+//             let tx = r.ro_transaction();
+//             for (i, x) in tx.borrow(xs).iter().enumerate() {
+//                 assert_eq!(i+1, tx.get(x).unwrap())
+//             }
+//         }
+//     }
+//     mkregion(Test);
+// }
 
 #[test]
 fn test_conflict() {
