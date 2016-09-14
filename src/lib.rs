@@ -146,6 +146,9 @@ impl<'a, T> RORef<'a, T> {
             Err(TransactionErr)
         }
     }
+    pub fn as_ptr(&self) -> *const T {
+        self.data
+    }
     pub fn get(&self) -> Result<T, TransactionErr> where T: TCopy {
         let result = unsafe { *self.data };
         try!(self.touch());
