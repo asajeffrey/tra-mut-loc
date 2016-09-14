@@ -156,6 +156,31 @@ impl<'a, T> RORef<'a, T> {
     }
 }
 
+pub struct ROIter<'a, T> where T: 'a {
+    size: usize,
+    first: RORef<'a, T>,
+}
+
+impl<'a, T> RORef<'a, Vec<T>> {
+    pub fn iter(&self) -> Result<ROIter<T>, TransactionErr> {
+        let data = unsafe { &*self.data };
+        let size = data.len();
+        let first = RORef {
+            tx_version: self.tx_version,
+            cell_version: self.cell_version,
+            data: data.as_ptr(),
+        };
+        try!(self.touch());
+        Ok(ROIter{ size: size, first: first })
+    }
+}
+
+impl<'a, T> Iterator for ROIter<'a, T> { type Item = RORef<'a, T>; fn
+    next(&mut self) -> Option<RORef<'a, T>> { match
+    self.size.checked_sub(1) { Some(size) => { let result =
+    self.first.clone(); self.size = size; self.first.data = unsafe {
+    self.first.data.offset(1) }; Some(result) }, None => None, } } }
+
 impl<'a, R: ?Sized> Drop for RWTransaction<'a, R> {
     fn drop(&mut self) {
         self.region_impl.version.store(self.version + 1, Ordering::Release);
@@ -239,20 +264,20 @@ fn test_rw() {
     mkregion(Test);
 }
 
-// #[test]
-// fn test_index() {
-//     struct Test;
-//     impl RegionConsumer for Test {
-//         fn consume<R: Region>(self, r: R) {
-//             let xs = r.mkcell(vec![ 1, 2, 3 ]);
-//             let tx = r.ro_transaction();
-//             for (i, x) in tx.borrow(xs).iter().enumerate() {
-//                 assert_eq!(i+1, tx.get(x).unwrap())
-//             }
-//         }
-//     }
-//     mkregion(Test);
-// }
+#[test]
+fn test_iter() {
+    struct Test;
+    impl RegionConsumer for Test {
+        fn consume<R: Region>(self, r: R) {
+            let xs = r.mkcell(vec![ 1, 2, 3 ]);
+            let tx = r.ro_transaction();
+            for (i, x) in tx.borrow(&xs).iter().unwrap().enumerate() {
+                assert_eq!(i+1, x.get().unwrap())
+            }
+        }
+    }
+    mkregion(Test);
+}
 
 #[test]
 fn test_conflict() {
