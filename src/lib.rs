@@ -9,21 +9,25 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-/// A trait for copyable data that contains no pointers.
-pub unsafe trait TCopy: Copy {}
-unsafe impl TCopy for bool {}
-unsafe impl TCopy for f32 {}
-unsafe impl TCopy for f64 {}
-unsafe impl TCopy for i8 {}
-unsafe impl TCopy for i16 {}
-unsafe impl TCopy for i32 {}
-unsafe impl TCopy for i64 {}
-unsafe impl TCopy for isize {}
-unsafe impl TCopy for u8 {}
-unsafe impl TCopy for u16 {}
-unsafe impl TCopy for u32 {}
-unsafe impl TCopy for u64 {}
-unsafe impl TCopy for usize {}
+/// A trait for data that contains no references
+// TODO: worry about safety in the presence of multiple regions
+pub unsafe trait Transact {}
+unsafe impl Transact for bool {}
+unsafe impl Transact for f32 {}
+unsafe impl Transact for f64 {}
+unsafe impl Transact for i8 {}
+unsafe impl Transact for i16 {}
+unsafe impl Transact for i32 {}
+unsafe impl Transact for i64 {}
+unsafe impl Transact for isize {}
+unsafe impl Transact for u8 {}
+unsafe impl Transact for u16 {}
+unsafe impl Transact for u32 {}
+unsafe impl Transact for u64 {}
+unsafe impl Transact for usize {}
+unsafe impl<R, T> Transact for TCell<R, T> where T: Deref {}
+unsafe impl<'a, T> Transact for RORef<'a, T> {}
+unsafe impl<T1, T2> Transact for (T1, T2) where T1: Transact, T2: Transact {}
 
 pub trait Region: 'static + Sync + Send {
     fn mkcell<T>(&self, init: T) -> TCell<Self, T>;
@@ -149,8 +153,11 @@ impl<'a, T> RORef<'a, T> {
     pub fn as_ptr(&self) -> *const T {
         self.data
     }
-    pub fn get(&self) -> Result<T, TransactionErr> where T: TCopy {
-        let result = unsafe { *self.data };
+    pub fn get(&self) -> Result<T, TransactionErr> where T: Transact + Clone {
+        Ok(try!(self.as_ref()).clone())
+    }
+    pub fn as_ref(&self) -> Result<&T, TransactionErr> where T: Transact {
+        let result = unsafe { &*self.data };
         try!(self.touch());
         Ok(result)
     }
