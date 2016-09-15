@@ -30,9 +30,12 @@ unsafe impl<'a, T> Transact for RORef<'a, T> {}
 unsafe impl<T1, T2> Transact for (T1, T2) where T1: Transact, T2: Transact {}
 
 pub trait Region: 'static + Sync + Send {
-    fn mkcell<T>(&self, init: T) -> TCell<Self, T>;
+    fn mkcell<T>(&self, init: T) -> TCell<Self, T> where T: Deref;
     fn rw_transaction<'a>(&'a self) -> RWTransaction<'a, Self>;
     fn ro_transaction<'a>(&'a self) -> ROTransaction<'a, Self>;
+    fn mkbox<T>(&self, init: T) -> TBox<Self, T> {
+        self.mkcell(Box::new(init))
+    }
 }
 
 pub trait RegionConsumer {
@@ -45,12 +48,14 @@ struct RegionImpl {
     lock: Mutex<()>,
 }
 
-#[derive(Debug)]
-pub struct TCell<R: ?Sized, T> {
+pub struct TCell<R: ?Sized, T> where T: Deref {
     version: AtomicUsize,
-    contents: UnsafeCell<T>,
+    rw_data: UnsafeCell<T>,
+    ro_data: UnsafeCell<*const T::Target>,
     phantom: PhantomData<R>,
 }
+
+pub type TBox<R, T> = TCell<R, Box<T>>;
 
 pub struct RWTransaction<'a, R: 'a+?Sized> {
     version: usize,
@@ -60,7 +65,7 @@ pub struct RWTransaction<'a, R: 'a+?Sized> {
     guard: MutexGuard<'a, ()>,
 }
 
-impl<'a, R:?Sized> fmt::Debug for RWTransaction<'a, R> {
+impl<'a, R: ?Sized> fmt::Debug for RWTransaction<'a, R> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         fmt.debug_struct("RWTransaction")
             .field("version", &self.version)
@@ -74,15 +79,14 @@ pub struct ROTransaction<'a, R: ?Sized> {
     phantom: PhantomData<(&'a (), R)>,
 }
 
-#[derive(Debug)]
-pub struct RWRef<'a, T> where 'a, T: 'a {
+pub struct RWRef<'a, T: ?Sized> where T: 'a + Deref {
     tx_version: usize,
     cell_version: &'a AtomicUsize,
-    data: &'a mut T,
+    rw_data: &'a mut T,
+    ro_data: &'a mut *const T::Target,
 }
 
-#[derive(Debug)]
-pub struct RORef<'a, T> where 'a, T: 'a {
+pub struct RORef<'a, T: ?Sized> where T: 'a {
     tx_version: usize,
     cell_version: &'a AtomicUsize,
     data: *const T,
@@ -96,14 +100,17 @@ impl<'a, T> Clone for RORef<'a, T> {
 #[derive(Copy, Clone, Debug)]
 pub struct TransactionErr;
 
-unsafe impl<R: ?Sized, T: Sync> Sync for TCell<R, T> {}
-unsafe impl<R: ?Sized, T: Send> Send for TCell<R, T> {}
+unsafe impl<R: ?Sized, T: Sync> Sync for TCell<R, T> where T: Deref {}
+unsafe impl<R: ?Sized, T: Send> Send for TCell<R, T> where T: Deref {}
 
 impl Region for RegionImpl {
-    fn mkcell<T>(&self, init: T) -> TCell<RegionImpl, T> {
+    fn mkcell<T>(&self, init: T) -> TCell<RegionImpl, T> where T: Deref {
+        // There are probably cases where this is unsafe, where
+        // init moves and causes &*init to be invalid.
         TCell {
             version: AtomicUsize::new(0),
-            contents: UnsafeCell::new(init),
+            ro_data: UnsafeCell::new(&*init),
+            rw_data: UnsafeCell::new(init),
             phantom: PhantomData,
         }
     }
@@ -127,21 +134,21 @@ impl Region for RegionImpl {
     }
 }
 
-impl<'a, T> Deref for RWRef<'a, T> {
+impl<'a, T> Deref for RWRef<'a, T> where T: Deref {
     type Target = T;
     fn deref(&self) -> &T {
-        &*self.data
+        &self.rw_data
     }
 }
 
-impl<'a, T> DerefMut for RWRef<'a, T> {
+impl<'a, T> DerefMut for RWRef<'a, T> where T: Deref {
     fn deref_mut(&mut self) -> &mut T {
         self.cell_version.store(self.tx_version, Ordering::Release);
-        &mut *self.data
+        &mut self.rw_data
     }
 }
 
-impl<'a, T> RORef<'a, T> {
+impl<'a, T: ?Sized> RORef<'a, T> {
     pub fn touch(&self) -> Result<(), TransactionErr> {
         // I think we need a CAS here for its ordering effects
         if self.cell_version.compare_and_swap(0, 0, Ordering::AcqRel) < self.tx_version {
@@ -158,6 +165,19 @@ impl<'a, T> RORef<'a, T> {
     }
     pub fn as_ref(&self) -> Result<&T, TransactionErr> where T: Transact {
         let result = unsafe { &*self.data };
+        try!(self.touch());
+        Ok(result)
+    }
+}
+
+impl<'a, R, T> RORef<'a, TCell<R, T>> where T: Deref {
+    pub fn borrow<'b>(&'b self) -> Result<RORef<'b, T::Target>, TransactionErr> {
+        let cell = unsafe { &*self.data };
+        let result = RORef {
+            tx_version: self.tx_version,
+            cell_version: &cell.version,
+            data: unsafe { *cell.ro_data.get() },
+        };
         try!(self.touch());
         Ok(result)
     }
@@ -182,11 +202,20 @@ impl<'a, T> RORef<'a, Vec<T>> {
     }
 }
 
-impl<'a, T> Iterator for ROIter<'a, T> { type Item = RORef<'a, T>; fn
-    next(&mut self) -> Option<RORef<'a, T>> { match
-    self.size.checked_sub(1) { Some(size) => { let result =
-    self.first.clone(); self.size = size; self.first.data = unsafe {
-    self.first.data.offset(1) }; Some(result) }, None => None, } } }
+impl<'a, T> Iterator for ROIter<'a, T> {
+    type Item = RORef<'a, T>;
+    fn next(&mut self) -> Option<RORef<'a, T>> {
+        match self.size.checked_sub(1) {
+            Some(size) => {
+                let result = self.first.clone();
+                self.size = size;
+                self.first.data = unsafe { self.first.data.offset(1) };
+                Some(result)
+            },
+            None => None,
+        }
+    }
+}
 
 impl<'a, R: ?Sized> Drop for RWTransaction<'a, R> {
     fn drop(&mut self) {
@@ -194,38 +223,46 @@ impl<'a, R: ?Sized> Drop for RWTransaction<'a, R> {
     }
 }
 
+impl<'a, T: ?Sized> Drop for RWRef<'a, T> where T: Deref {
+    fn drop(&mut self) {
+        *self.ro_data = &**self.rw_data;
+    }
+}
+
 impl<'a, R> RWTransaction<'a, R> where R: Region {
-    pub fn borrow<'b, T>(&'b self, cell: &'b TCell<R, T>) -> &'b T {
-        unsafe { cell.contents.get().as_ref().unwrap() }
+    pub fn borrow<'b, T>(&'b self, cell: &'b TCell<R, T>) -> &'b T where T: Deref {
+        unsafe { &*cell.rw_data.get() }
     }
-    pub fn mut_borrow<'b, T>(&'b mut self, cell: &'b TCell<R, T>) -> RWRef<'b, T> {
+    pub fn mut_borrow<'b, T>(&'b mut self, cell: &'b TCell<R, T>) -> RWRef<'b, T> where T: Deref {
         RWRef {
             tx_version: self.version,
             cell_version: &cell.version,
-            data: unsafe { cell.contents.get().as_mut().unwrap() },
+            rw_data: unsafe { &mut *cell.rw_data.get() },
+            ro_data: unsafe { &mut *cell.ro_data.get() },
         }
     }
-    pub fn borrow_mut<'b, T>(&'b self, cell: &'b mut TCell<R, T>) -> RWRef<'b, T> {
+    pub fn borrow_mut<'b, T>(&'b self, cell: &'b mut TCell<R, T>) -> RWRef<'b, T> where T: Deref {
         RWRef {
             tx_version: self.version,
             cell_version: &cell.version,
-            data: unsafe { cell.contents.get().as_mut().unwrap() },
+            rw_data: unsafe { &mut *cell.rw_data.get() },
+            ro_data: unsafe { &mut *cell.ro_data.get() },
         }
     }
-    pub fn mkcell<T>(&self, init: T) -> TCell<R, T> {
+    pub fn mkcell<T>(&self, init: T) -> TCell<R, T> where T: Deref {
         self.region.mkcell(init)
     }
 }
 
 impl<'a, R> ROTransaction<'a, R> {
-    pub fn borrow<'b, T>(&'b self, cell: &'b TCell<R, T>) -> RORef<'b, T> {
+    pub fn borrow<'b, T>(&'b self, cell: &'b TCell<R, T>) -> RORef<'b, T::Target> where T: Deref {
         RORef {
             tx_version: self.version,
             cell_version: &cell.version,
-            data: cell.contents.get(),
+            data: unsafe { *cell.ro_data.get() },
         }
     }
-    pub fn get<'b, T: TCopy>(&'b self, cell: &'b TCell<R, T>) -> Result<T, TransactionErr> {
+    pub fn get<'b, T>(&'b self, cell: &'b TCell<R, T>) -> Result<T::Target, TransactionErr> where T: Deref, T::Target: Transact + Copy {
         self.borrow(cell).get()
     }
 }
@@ -245,7 +282,7 @@ fn test_ro() {
     struct Test;
     impl RegionConsumer for Test {
         fn consume<R: Region>(self, r: R) {
-            let x = r.mkcell(37);
+            let x = r.mkbox(37);
             let tx = r.ro_transaction();
             assert_eq!(37, tx.get(&x).unwrap());
             assert_eq!(37, tx.borrow(&x).get().unwrap());
@@ -259,13 +296,13 @@ fn test_rw() {
     struct Test;
     impl RegionConsumer for Test {
         fn consume<R: Region>(self, r: R) {
-            let mut x = r.mkcell(37);
+            let mut x = r.mkbox(37);
             let mut tx = r.rw_transaction();
-            assert_eq!(37, *tx.borrow(&x));
-            *tx.mut_borrow(&x) = 5;
-            assert_eq!(5, *tx.borrow(&x));
-            *tx.borrow_mut(&mut x) = 42;
-            assert_eq!(42, *tx.borrow(&x));
+            assert_eq!(37, **tx.borrow(&x));
+            **tx.mut_borrow(&x) = 5;
+            assert_eq!(5, **tx.borrow(&x));
+            **tx.borrow_mut(&mut x) = 42;
+            assert_eq!(42, **tx.borrow(&x));
         }
     }
     mkregion(Test);
@@ -289,12 +326,12 @@ fn test_iter() {
 #[test]
 fn test_conflict() {
     struct Test;
-    fn thread<R: Region>(r: Arc<R>, x: Arc<TCell<R,usize>>, y: Arc<TCell<R,usize>>) -> Result<(),TransactionErr> {
+    fn thread<R: Region>(r: Arc<R>, x: Arc<TBox<R,usize>>, y: Arc<TBox<R,usize>>) -> Result<(),TransactionErr> {
         // Increment both x and y
         {
             let mut tx = r.rw_transaction();
-            *tx.mut_borrow(&x) = *tx.borrow(&x) + 1;
-            *tx.mut_borrow(&y) = *tx.borrow(&y) + 1;
+            **tx.mut_borrow(&x) = **tx.borrow(&x) + 1;
+            **tx.mut_borrow(&y) = **tx.borrow(&y) + 1;
         }
         // Check that x == y
         {
@@ -308,8 +345,8 @@ fn test_conflict() {
     impl RegionConsumer for Test {
         fn consume<R: Region>(self, r: R) {
             let r = Arc::new(r);
-            let x = Arc::new(r.mkcell(37));
-            let y = Arc::new(r.mkcell(37));
+            let x = Arc::new(r.mkbox(37));
+            let y = Arc::new(r.mkbox(37));
             let mut threads = Vec::new();
             for _ in 0..1000 {
                 let (r, x, y) = (r.clone(), x.clone(), y.clone());
