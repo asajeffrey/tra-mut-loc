@@ -188,8 +188,27 @@ pub struct ROIter<'a, T> where T: 'a {
     first: RORef<'a, T>,
 }
 
-impl<'a, T> RORef<'a, Vec<T>> {
-    pub fn iter(&self) -> Result<ROIter<T>, TransactionErr> {
+impl<'a, T1, T2> RORef<'a, (T1, T2)> {
+    pub fn split(&self) -> (RORef<'a, T1>, RORef<'a, T2>) {
+        let data1 = self.data as *const T1;
+        let data2 = unsafe { data1.offset(1) } as *const T2;
+        (
+            RORef {
+                tx_version: self.tx_version,
+                cell_version: self.cell_version,
+                data: data1,
+            },
+            RORef {
+                tx_version: self.tx_version,
+                cell_version: self.cell_version,
+                data: data2,
+            },
+        )
+    }
+}
+
+impl<'a, T> RORef<'a, [T]> {
+    pub fn iter(self) -> Result<ROIter<'a, T>, TransactionErr> {
         let data = unsafe { &*self.data };
         let size = data.len();
         let first = RORef {
