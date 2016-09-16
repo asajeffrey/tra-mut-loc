@@ -190,6 +190,16 @@ impl<'a, T: ?Sized> RORef<'a, T> {
     }
 }
 
+impl<'a, T> RWCellRef<'a, T> where T: Deref {
+    pub fn as_rwref<'b>(&'b mut self) -> RWRef<'b, T> {
+        RWRef {
+            tx_version: self.tx_version,
+            cell_version: self.cell_version,
+            data: self.rw_data,
+        }
+    }
+}
+
 impl<'a, R, T> RWRef<'a, TCell<R, T>> where T: Deref {
     // TODO: Not safe in the case of multiple regions
     pub fn borrow_mut<'b>(&'b mut self) -> RWCellRef<'b, T> {
