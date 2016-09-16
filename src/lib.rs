@@ -5,7 +5,9 @@
 use std::cell::{UnsafeCell};
 use std::fmt;
 use std::marker::PhantomData;
+use std::mem;
 use std::ops::{Deref, DerefMut};
+use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -180,13 +182,19 @@ impl<'a, T: ?Sized> RORef<'a, T> {
     pub fn as_ptr(&self) -> *const T {
         self.data
     }
-    pub fn get(&self) -> Result<T, TransactionErr> where T: Transact + Clone {
-        Ok(try!(self.as_ref()).clone())
-    }
-    pub fn as_ref(&self) -> Result<&T, TransactionErr> where T: Transact {
-        let result = unsafe { &*self.data };
-        try!(self.touch());
-        Ok(result)
+    pub fn get(&self) -> Result<T, TransactionErr> where T: Transact + Copy {
+        unsafe {
+            let mut result = mem::uninitialized();
+            // TODO: this may be unsafe in the case that the memory for the data
+            // is freed while we're doing the copy.
+            ptr::copy_nonoverlapping(self.data, &mut result, 1);
+            if self.touch().is_ok() {
+                Ok(result)
+            } else {
+                mem::forget(result);
+                Err(TransactionErr)
+            }
+        }
     }
 }
 
