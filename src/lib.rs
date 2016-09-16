@@ -79,11 +79,17 @@ pub struct ROTransaction<'a, R: ?Sized> {
     phantom: PhantomData<(&'a (), R)>,
 }
 
-pub struct RWRef<'a, T: ?Sized> where T: 'a + Deref {
+pub struct RWCellRef<'a, T> where T: 'a + Deref {
     tx_version: usize,
     cell_version: &'a AtomicUsize,
     rw_data: &'a mut T,
     ro_data: &'a mut *const T::Target,
+}
+
+pub struct RWRef<'a, T: ?Sized> where T: 'a {
+    tx_version: usize,
+    cell_version: &'a AtomicUsize,
+    data: &'a mut T,
 }
 
 pub struct RORef<'a, T: ?Sized> where T: 'a {
@@ -134,17 +140,31 @@ impl Region for RegionImpl {
     }
 }
 
-impl<'a, T> Deref for RWRef<'a, T> where T: Deref {
+impl<'a, T> Deref for RWCellRef<'a, T> where T: Deref {
     type Target = T;
     fn deref(&self) -> &T {
         &self.rw_data
     }
 }
 
-impl<'a, T> DerefMut for RWRef<'a, T> where T: Deref {
+impl<'a, T> DerefMut for RWCellRef<'a, T> where T: Deref {
     fn deref_mut(&mut self) -> &mut T {
         self.cell_version.store(self.tx_version, Ordering::Release);
         &mut self.rw_data
+    }
+}
+
+impl<'a, T: ?Sized> Deref for RWRef<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.data
+    }
+}
+
+impl<'a, T: ?Sized> DerefMut for RWRef<'a, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.cell_version.store(self.tx_version, Ordering::Release);
+        &mut self.data
     }
 }
 
@@ -170,7 +190,20 @@ impl<'a, T: ?Sized> RORef<'a, T> {
     }
 }
 
+impl<'a, R, T> RWRef<'a, TCell<R, T>> where T: Deref {
+    // TODO: Not safe in the case of multiple regions
+    pub fn borrow_mut<'b>(&'b mut self) -> RWCellRef<'b, T> {
+        RWCellRef {
+            tx_version: self.tx_version,
+            cell_version: &self.data.version,
+            rw_data: unsafe { &mut *self.data.rw_data.get() },
+            ro_data: unsafe { &mut *self.data.ro_data.get() },
+        }
+    }
+}
+
 impl<'a, R, T> RORef<'a, TCell<R, T>> where T: Deref {
+    // TODO: Not safe in the case of multiple regions
     pub fn borrow<'b>(&'b self) -> Result<RORef<'b, T::Target>, TransactionErr> {
         let cell = unsafe { &*self.data };
         let result = RORef {
@@ -188,8 +221,26 @@ pub struct ROIter<'a, T> where T: 'a {
     first: RORef<'a, T>,
 }
 
+impl<'a, T1, T2> RWRef<'a, (T1, T2)> {
+    pub fn split(self) -> (RWRef<'a, T1>, RWRef<'a, T2>) {
+        let &mut (ref mut data1, ref mut data2) = self.data;
+        (
+            RWRef {
+                tx_version: self.tx_version,
+                cell_version: self.cell_version,
+                data: data1,
+            },
+            RWRef {
+                tx_version: self.tx_version,
+                cell_version: self.cell_version,
+                data: data2,
+            },
+        )
+    }
+}
+
 impl<'a, T1, T2> RORef<'a, (T1, T2)> {
-    pub fn split(&self) -> (RORef<'a, T1>, RORef<'a, T2>) {
+    pub fn split(self) -> (RORef<'a, T1>, RORef<'a, T2>) {
         let data1 = self.data as *const T1;
         let data2 = unsafe { data1.offset(1) } as *const T2;
         (
@@ -242,9 +293,11 @@ impl<'a, R: ?Sized> Drop for RWTransaction<'a, R> {
     }
 }
 
-impl<'a, T: ?Sized> Drop for RWRef<'a, T> where T: Deref {
+impl<'a, T> Drop for RWCellRef<'a, T> where T: Deref {
     fn drop(&mut self) {
-        *self.ro_data = &**self.rw_data;
+        if self.cell_version.load(Ordering::Relaxed) == self.tx_version {
+            *self.ro_data = &**self.rw_data;
+        }
     }
 }
 
@@ -252,16 +305,16 @@ impl<'a, R> RWTransaction<'a, R> where R: Region {
     pub fn borrow<'b, T>(&'b self, cell: &'b TCell<R, T>) -> &'b T where T: Deref {
         unsafe { &*cell.rw_data.get() }
     }
-    pub fn mut_borrow<'b, T>(&'b mut self, cell: &'b TCell<R, T>) -> RWRef<'b, T> where T: Deref {
-        RWRef {
+    pub fn mut_borrow<'b, T>(&'b mut self, cell: &'b TCell<R, T>) -> RWCellRef<'b, T> where T: Deref {
+        RWCellRef {
             tx_version: self.version,
             cell_version: &cell.version,
             rw_data: unsafe { &mut *cell.rw_data.get() },
             ro_data: unsafe { &mut *cell.ro_data.get() },
         }
     }
-    pub fn borrow_mut<'b, T>(&'b self, cell: &'b mut TCell<R, T>) -> RWRef<'b, T> where T: Deref {
-        RWRef {
+    pub fn borrow_mut<'b, T>(&'b self, cell: &'b mut TCell<R, T>) -> RWCellRef<'b, T> where T: Deref {
+        RWCellRef {
             tx_version: self.version,
             cell_version: &cell.version,
             rw_data: unsafe { &mut *cell.rw_data.get() },
