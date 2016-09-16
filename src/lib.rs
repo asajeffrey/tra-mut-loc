@@ -222,7 +222,7 @@ pub struct ROIter<'a, T> where T: 'a {
 }
 
 impl<'a, T1, T2> RWRef<'a, (T1, T2)> {
-    pub fn split(self) -> (RWRef<'a, T1>, RWRef<'a, T2>) {
+    pub fn split(&mut self) -> (RWRef<T1>, RWRef<T2>) {
         let &mut (ref mut data1, ref mut data2) = self.data;
         (
             RWRef {
@@ -240,7 +240,7 @@ impl<'a, T1, T2> RWRef<'a, (T1, T2)> {
 }
 
 impl<'a, T1, T2> RORef<'a, (T1, T2)> {
-    pub fn split(self) -> (RORef<'a, T1>, RORef<'a, T2>) {
+    pub fn split(&self) -> (RORef<T1>, RORef<T2>) {
         let data1 = self.data as *const T1;
         let data2 = unsafe { data1.offset(1) } as *const T2;
         (
