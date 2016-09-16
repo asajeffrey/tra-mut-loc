@@ -273,16 +273,17 @@ impl<'a, T> RORef<'a, [T]> {
     }
 }
 
-impl<'a, T> RWRef<'a, [T]> {
-    // TODO: iterator for RWRef<[T]>
-    pub fn get_mut(self, index: usize) -> Option<RWRef<'a, T>> {
-        let tx_version = self.tx_version;
-        let cell_version = self.cell_version;
-        self.data.get_mut(index).map(|item| RWRef {
-            tx_version: tx_version,
-            cell_version: cell_version,
-            data: item,
-        })
+impl<'a, T, U> RWCellRef<'a, T> where T: DerefMut<Target = [U]> {
+    // TODO: find a way to share code between RWRef and RWCellRef
+    pub fn get_mut<'b>(&'b mut self, index: usize) -> Option<RWRef<'b, U>> {
+        match self.rw_data.get_mut(index) {
+            Some(data) => Some(RWRef {
+                tx_version: self.tx_version,
+                cell_version: self.cell_version,
+                data: data,
+            }),
+            None => None,
+        }
     }
 }
 
