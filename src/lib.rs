@@ -259,6 +259,7 @@ impl<'a, T1, T2> RORef<'a, (T1, T2)> {
 }
 
 impl<'a, T> RORef<'a, [T]> {
+    // TODO: accessor for RWRef<[T]>
     pub fn iter(self) -> Result<ROIter<'a, T>, TransactionErr> {
         let data = unsafe { &*self.data };
         let size = data.len();
@@ -269,6 +270,19 @@ impl<'a, T> RORef<'a, [T]> {
         };
         try!(self.touch());
         Ok(ROIter{ size: size, first: first })
+    }
+}
+
+impl<'a, T> RWRef<'a, [T]> {
+    // TODO: iterator for RWRef<[T]>
+    pub fn get_mut(self, index: usize) -> Option<RWRef<'a, T>> {
+        let tx_version = self.tx_version;
+        let cell_version = self.cell_version;
+        self.data.get_mut(index).map(|item| RWRef {
+            tx_version: tx_version,
+            cell_version: cell_version,
+            data: item,
+        })
     }
 }
 
