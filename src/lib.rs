@@ -190,12 +190,12 @@ impl<'a, T: ?Sized> RORef<'a, T> {
     }
 }
 
-impl<'a, T> RWCellRef<'a, T> where T: Deref {
-    pub fn as_rwref<'b>(&'b mut self) -> RWRef<'b, T> {
+impl<'a, T> RWCellRef<'a, T> where T: DerefMut {
+    pub fn as_rwref<'b>(&'b mut self) -> RWRef<'b, T::Target> {
         RWRef {
             tx_version: self.tx_version,
             cell_version: self.cell_version,
-            data: self.rw_data,
+            data: &mut **self.rw_data,
         }
     }
 }
